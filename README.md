@@ -1,150 +1,154 @@
-# jittor_comp_human
+### **Team**
+团队名称： **VIPLab**
+A榜排名： 22
+联系人： 李腾飞
+联系方式： ltf15516991101(wx)  15516991101(Tell)
+### **Introduction**
+我们的整体实现思路与baseline一致，分两阶段先预测骨骼再预测皮肤权重。在复现baseline时我们发现骨骼的预测结果差强人意，从而影响后续皮肤权重的预测。所以我们首要关注的目标就是骨骼预测任务，通过更换更强大的模型，数据增强，增加先验以及约束来优化这个任务。
+##### Skeleton Model
+Skeleton Model是我们主要改动的部分，分为Encoder和Decoder两部分。
+我们使用[3DShape2Vec[1]](http://arxiv.org/abs/2301.11445) 作为Encoder，以获取鲁棒的潜在三维模型表征latent。受到[DETR[2]](http://arxiv.org/abs/2005.12872) 的启发，Decoder部分我们使用NumJoints个可学习向量作为Query，以latent作为KV，进行交叉注意力，最后通过一个final layer得到最后的结果。
+根据实验结果，我们还进行了以下优化：
++ 增加点云顶点的采样数，增强三维空间结构输入。
++ 在数据处理中添加`随机缩放`、`随机旋转`和`随机姿态变换矩阵`三种数据增强方法，以增强对少量奇怪姿态的理解能力。
++ 在训练过程中除了`MSE`和`J2J`约束外我们还添加了`骨长对称性约束`、`平面对称性约束`、`拓扑一致性约束`、`跟关节位置约束`和`模型内部约束`等解剖约束和先验约束，详细参数可以在训练代码中查看。
+##### Skin Model
+经过上述步骤后，我们可以获得鲁棒的骨骼预测结果。Skin Model采用和baseline一致的训练方法，沿用GT输入（我们尝试过增加随机噪声扰动以模拟预测骨骼的误差，但是效果不是很好，仍需要调整），PCT[3] 作为模型框架的策略，我们简单调整了训练参数，数据增强方法同上。
+##### DATA
+除此以外，我们依次人工浏览了训练集的数据，挑选出了极少数难以拟合的样本（27个，约占0.5%），我们在训练时丢弃了这些bad case。
 
-计图比赛骨骼绑定赛题
-
-# 前置知识
-
-在计算机图形学中，骨骼动画是重要的研究对象。本赛题将在经典的骨骼表示和linear blend shape算法框架下预测一个网格的骨骼节点（joint）。
-
-一个网格 $\mathcal{M}$（mesh）能被顶点 $\mathcal{V}$ 和三角面片 $\mathcal{F}$ 刻画，其中 $\mathcal{V}\in\mathbb{R}^{n\times 3}$ 为包含 $n$ 个三维顶点的矩阵， $\mathcal{F}\in\mathbb{N}^{f\times 3}$ 为描述了每个三角面片包含的顶点下标的矩阵。
-
-那么，为了让网格动起来，需要额外添加什么东西？首先运动的肯定是网格上的顶点，为方便起见不考虑顶点和顶点之间的影响。也就是说需要找到一个关于顶点 $x$ 的函数 $f$ ， $f_{\mathcal{M}}(x,M)$ 能够表示网格 $\mathcal{M}$ 上的顶点 $x$ ，在条件 $M$ 下时最后变换到的位置。如果只考虑一些简单的形变，例如平移、旋转，那么这些信息可以由一个 $4\times 4$ 的仿射矩阵$M$表示。
-
-其次，当谈到形变时，不得不考虑它究竟是在哪一个坐标系中进行的，也就是说需要描述顶点究竟是关于那个局部坐标系，进行了如何的变换。这里一个简单的想法是引入局部坐标系在全局坐标系中的坐标 $x,y,z$ 。但是描述“顶点绕局部坐标系旋转90°”时，需要知道顶点是朝着哪个方向旋转的，就需要记录局部坐标系的 $x,y,z$ 轴的方向，也就是说局部坐标系也可以被表示成一个 $4\times 4$ 的仿射矩阵 $M_{c}$ 。
-
-同时，大家希望顶点能够收到多个局部坐标系的控制，那么不同的局部坐标系对同一个顶点的影响是如何的？一种朴素的想法是把他们的效果线性叠加，同时系数归一化。
-
-最后，受到人体关节的启发，局部坐标系可以影响到另一部分局部坐标系，但他们的影响不应该成环。也就是说局部坐标系的影响关系应该形成一棵“树”。对树中的每个节点赋值基础的变换后，子树中的每个节点都可以根据其祖先和自己的基础变换得到最后的变换值。
-
-那么，形式化地，一个网格可以规定他的骨架 $\mathcal{J}$ ，每个顶点关于骨架的权重 $\mathcal{S}$ ，每个joint的父亲节点 $\mathcal{P}\in\{\mathbb{N}\cup\{-1\}\}$ ，其中 $\mathcal{J}\in\mathbb{R}^{J\times 3}$ 为包含了 $J$ 个joint的坐标的矩阵， $\mathcal{S}\in\mathbb{R}^{n\times J}$ 描述了每个节点关于这 $J$ 个joint的权重的矩阵。第 $i$ 个joint有初始的状态 $M_{local,i}$ 、终止的状态 $M_{pose,i}$ ，那么最后第 $j$ 个顶点 $v_j(x, y, z, 1)$ 的位置即为：
-```math
-f_{\mathcal{M}}(v_j, M)=\sum_{i=1}^{J} \mathcal{S}_{j, i} M_{pose,i} * M_{local_i}^{-1}v_j
+### 代码结构
+``` txt
+.
+|-- checkpoint      # 提交的checkpoint 
+|-- data            # 数据集
+|-- dataset       
+|   |-- asset.py  
+|   |-- dataset.py  # 新增数据增强方法，包括随机缩放、随机旋转、随机姿态变换
+|   |-- ...
+|   `-- utils.py
+|-- launch
+|-- models
+|   |-- PCT                # PCT相关代码实现
+|   |-- metrics.py         # 新增对称约束、骨长对称约束、拓扑一致性约束、跟关节约束、模型内部约束
+|   |-- pointnet_ops.py    # jittor FPS采样cuda加速实现
+|   |-- sal_perceiver.py   # 3DShape2Vec jittor实现
+|   |-- skeleton.py        #　skeleton model 新增sal方法
+|   |-- skin.py            # skin model
+|   `-- transformers.py    # Transformer MHSA CrossAttention 等相关操作实现
+|-- scripts                
+|   |-- pipeline.sh          # 训练脚本
+|   |-- predict_skeleton.sh  # 骨骼预测脚本
+|   `-- predict_skin.sh      # 皮肤权重预测脚本
+|-- predict_skeleton.py
+|-- predict_skin.py
+|-- train_skeleton.py
+|-- train_skin.py
+|-- drop_list.txt         # 人工筛选排除掉数据集中的bad case使训练更稳定
+|-- requirements.txt
+|-- Dockerfile
+|-- LICENSE
+`-- README.md
 ```
 
-其中乘法表示矩阵乘法，且 $\sum_{i=1}^{j}v_{j,i}=1$（归一化）。 $\mathcal{P}$ 表示了父亲节点的下标（-1表示根节点，没有父亲），并且有：
-
-```math
-M_{pose,i}=M_{pose,\mathcal{P}_{i}} * \left( M_{local,\mathcal{P}_{i}}^{-1} *M_{local,i} \right)  * M_{basis,i}
+### 环境配置：
+1. 安装NVIDIA Container Toolkit
+2. 当前用户加入docker组, 命令 `sudo usermod -aG docker $USER`
+3. 刷新，命令：`newgrp docker`
+#### Docker：
+##### Docker Bulid 
+**(展示我们的创建过程，无需执行)**
+```bash
+bash dockerbuild.sh
 ```
+`Dockerfile`和`dockerbuild.sh`可以在我们提供的docker项目文件中找到。
 
-其中 $M_{basis_i}$ 表示第 $i$ 个joint的基础变换矩阵，默认 $M_{pose,-1},M_{local,-1}$ 为单位矩阵。并且 $M_{pose}$ 应该递归计算。
-
-**如果选手不明白上面在说什么，也不必担心具体实现。baseline中已经给出了上述计算的全部实现。**
-
-本赛题中，选手需要根据给定数据集，预测出网格的骨架 $\mathcal{J}$ 的**坐标**（不包括坐标轴的方向）和权重 $\mathcal{S}$ 。为方便起见，骨架中joint的个数总是一个固定的值，骨架的连接关系 $\mathcal{P}$ 也是固定的。
-
-## 运行环境
-
-首先确保电脑上安装了conda进行坏境管理。在terminal中依次运行以下代码：
-
+##### 加载镜像：
+```bash
+docker load -i contest2_viplab_22.tar.gz
 ```
-conda create -n jittor_comp_human python=3.9
-conda activate jittor_comp_human
-conda install -c conda-forge gcc=10 gxx=10 # 确保gcc、g++版本不高于10
-pip install -r requirements.txt
+##### 容器启动
+同时挂载数据到容器
+数据集即比赛官方提供的[数据集](https://cloud.tsinghua.edu.cn/f/676c582527f34793bbac/?dl=1),可以由此下载解压缩到本地。
+```bash
+docker run --gpus all -it --rm  -v  [path/data]:/workspace/project/data contest2_viplab_22:submit
+# 示例：
+docker run --gpus all -it --rm  -v /home/hxgk/MoGen/jittor-comp-human/data:/workspace/project/data contest2_viplab_22:submit
 ```
-
-## 数据下载
-
-[点击下载](https://cloud.tsinghua.edu.cn/f/676c582527f34793bbac/?dl=1)
-
-下载后将其解压缩到当前根目录。
-
-## baseline介绍
-
-baseline分为预测joint、预测skin两个阶段。所有输入的数据均被归一化到了`[-1, 1]^3`中（包括joint，选手需多加注意），并且在mesh表面通过随机顶点+混合均匀采样的方式得到`(batch, n, 3)`的点云。
-
-在第一阶段中，模型使用PointTransformer [1](#ref1) 将输入的形状为`(batch, n, 3)`的三维点云变成了形状为`(batch, feat_dim)`的隐向量，之后通过一个`MLP`得到形状为`(batch, 66)`的输出（66=3*22，22为固定的joint个数），通过reshape操作便得到了最终预测的joint。
-
-在第二阶段中，模型先使用PointTransformer得到形状为`(batch, feat_dim)`的形状隐向量，再将其分别用于两个`MLP`，得到了每个点和joint的`query`向量，接着通过类似于交叉注意力 [2](#ref2) 的方式得到每个点关于每个joint的得分，最后通过`softmax`得到了每个点关于每个joint的权重。
-
-可以看到以上网络的实现仍然是比较朴素的，我们希望选手能在此基础上探索更具有泛化性能的网络来获得更好的效果。
-
-## 运行baseline
-
-运行baseline训练代码：
-
+或者
+```bash
+docker run --gpus all -it  --rm contest2_viplab_22:submit
+# 再添加data到 /workspace/project 即 workspace/project/data: 命令如下：
+docker cp /path/to/local/file <container_id>:/path/in/container/
 ```
-bash launch/train_skeleton.sh
-bash launch/train_skin.sh
+进入容器后项目路径位于`/workspace/project/`，进入容器后默认位于该目录下。checkpoint位于`checkpoint/`目录下，同时其中包含我们的训练记录log，需要运行的脚本位于`scripts/`目录下。
+
+### 运行步骤
+#### Train
+```bash
+bash scripts/pipeline.sh
 ```
+训练过程记录以及结果将保存在`output/`目录下。
+我们的训练日志可以在`checkpoint/`目录下找到。
+**参数说明：**
+数据集参数
+`--num_samples`: 模型的采样数，包含顶点采样和面采样
+`--vertex_samples`: 采样器在顶点上的采样数
+`--rotation_range`:数据增强随机旋转的角度
+`--scaling_range`:数据增强随机缩放的比例包含两个值分别为最小和最大值
+`--aug_prob`:每个sample被数据增强的概率，默认0.5，每种数据增强方式独立判断
+`--drop_bad`:是否丢弃bad case
+`--pose_angle_range`: 数据增强随机姿态变换的角度，随机作用在每个骨骼关节处
 
-其中，`train_skeleton`会运行骨骼预测训练，在一张4090上需要2GB显存，大致运行2小时。train_skin会运行蒙皮预测训练，在一张4090上需要略大于2GB显存，大致运行2小时。模型会保存在`output`文件夹下。
+模型参数
+`--model_name`: 模型类型 新增`sal`选项
+`--wnormals`: 是否法向量作为embeding，仅`sal`
+`--num_tokens`: 潜空间的token数，仅`sal`
+`--feat_dim`: 模型的默认维度
+`--encoder_layers`: 使用的Transformer encoder层数，仅`sal`
+`--pct_feat_dim`: PCT模型的默认维度，区别于`feat_dim`，仅`pct` `pct2`
 
-同时，一些临时在`validate`集上的预测结果会输出在`tmp`文件夹中，选手可以查看其中的内容来判断训练是否大致正确。最终会占用13GB的空间，因此选手应该预留足够多的空间或选择减少输出中间的可视化结果。
-
-## 预测并提交结果
-
-运行预测代码：
-
+训练参数
+`--batch_size`: 批大小
+`--optimizer`: 优化器类型，新增`adamw` 
+`--learning_rate`: 学习率
+`--lr_scheduler`: 学习率更新策略，包含`step`周期性衰减和`cosine`余弦退火学习率调度策略
+`--lr_min`: 最小的学习率，仅`consine`
+`--sym_loss_weight`: 对称约束权重占比，默认0.05
+`--bone_length_symmetry_weight`: 骨长对称性约束占比，默认0.5
+`--J2J_loss_weight`:J2J约束权重占比，默认1.0
+`--topo_loss_weight`:拓扑一致性约束权重占比，默认0.1
+`--rel_pos_loss_weight`:跟关节一致性约束权重占比，默认0.1
+`--mesh_interior_weight`:模型内部约束权重占比，约束预测的骨骼位于mesh模型内部，默认0.5
+`--interior_margin`: 模型内部约束的边缘惩罚项，使骨骼预测结果远离mesh模型边缘，默认0.01
+`--terminal_interior_loss`: 是否取消骨骼终端约束，即是否将模型内部约束应用于双手和双脚
+`--use_normals_interior`: 是否使用法向量计算的方法计算模型内部约束
+`--interior_k_neighbors`: 指定计算内部约束的K个最近邻居数，默认50
+更多参数可以在`train_skeleton.py`和`trian_skin.py`代码中查找定义。
+#### Inference
++ 预测骨架
+```bash
+bash scripts/predict_skeleton.sh
 ```
-bash launch/predict_skeleton.sh
-bash launch/predict_skin.sh
++ 预测权重
+```bash
+bash scripts/predict_skin.sh
 ```
+推理结果将保存在`predict/`目录下。
 
-预测的结果会输出在`predict`中。
+### Checkpoint 说明
+我们提供当前榜上排名最优(rank 22)的checkpoint，包含skeleton和skin两个模型分别位于`checkpoint/skeleton` 和 `checkpoint/skin`下，另分别附我们的训练log。
++ skeleton model best训练500轮，验证集最优出现在470轮，验证集mse Loss: 0.0016 J2J Loss: 0.0162
++ skin model best训练1000轮，验证集最优出现在858轮，验证集mse: 0.0044 l1: 0.0115
 
-如果需要可视化预测结果，可以运行以下代码（需要下面的debug环境）：
+基于下面出现的不确定性情况，我们另外提供我们当前验证集上最好性能的骨骼模型于`checkpoint/skeleton_best` ，另附训练log。
++ skeleton_best model best训练500轮， 验证集最优在493轮，验证集mse Loss: 0.0011 J2J Loss: 0.0147
+更多训练细节可以在我们的训练log中查看。
+### 其他补充
+由于我们的模型中包含随机过程，具体参见`models/sal_perceiver.py line 186-190`，以及随机Dropout和BatchNorm操作，就在最近我们发现预测代码中没有调用`model.eval()`方法，尽管我们固定了随机种子，但是预测过程中仍存在随机过程。基于上述原因我们未能完全复现系统中提交的预测结果，在取消`model.eval()`的情况下，每次运行的结果存在一定差异。现在我们提供的代码中已经修复这个问题，每次预测的结果会保持一致，但是预测结果可能和提交的代码存在差异，由于提交系统已经关闭我们无法验证当前的效果，对此我们表示歉意。您也可以通过注释`predict_skeleton.py line 34`以及`predict_skin.py line line 34`来进行随机测试。
+我们同时提供当前可能效果更好的skeleton模型于`checkpoint/skin_best/`目录中同时附带训练过程的log，您也可以通过调整`scripts/predict_skeleton.sh`以及`scripts/predict_skin.sh`中被注释掉的部分来预测。
 
-```
-# 只渲染图片结果
-bash launch/render_predict_results.sh
-
-# 不渲染图片结果，但是导出fbx文件
-bash launch/render_predict_results.sh --render False --export_fbx True
-```
-
-渲染的结果将会输出到`tmp_predict`中。
-
-选手最终需要提交以下结果：
-
-```
-predict
-└   vroid
-│   ├   2011
-│   │   ├   predict_skeleton.npy
-│   │   ├   predict_skin.npy
-│   │   └   transformed_vertices.npy
-│   ├   2012
-│   │   ├   predict_skeleton.npy
-│   │   ├   predict_skin.npy
-│   │   └   transformed_vertices.npy
-│   ...
-└mixamo
-    ├   3189
-    │   ├   ...
-    ...
-```
-其中，`vroid`文件夹中必须包含`data/test_list.txt`中的所有`cls`为`vroid`的待预测文件，`mixamo`文件夹中必须包含`data/test_list.txt`中的所有`cls`为`mixamo`的待预测文件。
-
-`predict_skeleton.npy`是预测的骨骼数据，包含形状为`(J, 3)`的数据，每行的含义参考`dataset/format.py`。
-
-`predict_skin.npy`是预测的蒙皮数据，包含形状为`(N, J)`的数据，其中第`i`行的`J`个数字对应了原本的`mesh`的第`i`个节点，分别关于骨骼的`J`个蒙皮权值。
-
-`transformed_vertices.npy`是选手预测的骨骼对应的顶点坐标，包含形状为`(N, 3)`的数据。选手*要确保*预测的骨架能够对应这个顶点数据（也就是说，对于原本顶点坐标的`transform`操作，和对于预测骨骼的`transform`操作要完全一致）。在评测时会将原本`mesh`的顶点和选手给出的`transformed_vertices`归一化到`[-1, 1]^3`中进行评测。评测指标包括`joint to joint loss`、`vertex loss`、`skin l1 loss`、`vertex normalization loss`。
-
-## 可视化
-
-本赛题的可视化比较困难，因此需要使用特殊的环境来进行debug和可视化。
-
-首先安装环境：
-
-```
-conda create -n jittor_comp_human_debug python=3.11
-conda activate jittor_comp_human_debug
-pip install -r requirements_debug.txt
-```
-
-在`dataset/exporter.py`中的`Exporter`里提供了一系列可视化的操作。选手可以参考`debug_example.py`中的文件。
-
-除了查看直接的渲染结果（以`_render`开头的api），选手可以使用以下方式查看`obj`等结果：
-
-1. 在vscode中安装相应的3d浏览插件，例如`vscode-3d-preview`。
-
-2. 使用一些建模软件，例如`blender`。
-
-## 参考文献
-
-<a name="ref1"></a> [PCT: Point Cloud Transformer](https://arxiv.org/abs/2012.09688)
-
-<a name="ref2"></a> [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
+### Reference
+[1] Zhang B, Tang J, Niessner M, et al. 3dshape2vecset: A 3d shape representation for neural fields and generative diffusion models[J]. ACM Transactions On Graphics (TOG), 2023, 42(4): 1-16.
+[2] Carion N, Massa F, Synnaeve G, et al. End-to-end object detection with transformers[C]//European conference on computer vision. Cham: Springer International Publishing, 2020: 213-229.
+[3] Guo M H, Cai J X, Liu Z N, et al. Pct: Point cloud transformer[J]. Computational visual media, 2021, 7(2): 187-199.

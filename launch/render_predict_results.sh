@@ -1,7 +1,7 @@
-predict_output_dir="predict"
-render_output_dir="tmp_predict"
-render="true"
-export_fbx="false"
+predict_output_dir="predict/sal_t1024_pc16384_w512_h8_e12_all_cos_emb_whnormals_normals_paug_load_nval"
+render_output_dir="render/sal_t1024_pc16384_w512_h8_e12_all_cos_emb_whnormals_normals_paug_load_nval"
+render="false"
+export_fbx="true"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in

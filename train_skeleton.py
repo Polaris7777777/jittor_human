@@ -23,8 +23,10 @@ from models.metrics import (
 import wandb
 os.environ["WANDB_MODE"] = "offline"
 
-# import tensorboardX as SummaryWriter
-
+# if hard
+dataset_with_hand = os.environ.get('HARD', '0').lower() in ['1', 'true', 'yes', 'on']
+print(f'Joints: {52 if dataset_with_hand else 22}')
+# import pdb;pdb.set_trace()
 # Set Jittor flags
 jt.flags.use_cuda = 1
 
@@ -59,10 +61,11 @@ def train(args):
         log_message(f"Starting training with parameters: {args}")
     
     # Create model
+    num_skeletons = 52 if dataset_with_hand else 22
     model = create_model(
         model_name=args.model_name,
         model_type=args.model_type,
-        output_channels=args.num_skeletons * 3,  # Each joint has 3 coordinates (x, y, z)
+        output_channels=num_skeletons * 3,  # Each joint has 3 coordinates (x, y, z)
         with_normals=args.wnormals,
         num_tokens=args.num_tokens,
         feat_dim=args.feat_dim,
@@ -75,8 +78,11 @@ def train(args):
     if args.pretrained_model:
         if jt.rank==0: 
             log_message(f"Loading pretrained model from {args.pretrained_model}")
-        # model.load(args.pretrained_model)
-        model.load_with_skeleton_transfer(args.pretrained_model, num_pretrained_skeletons=22)
+
+        if dataset_with_hand:
+            model.load_with_skeleton_transfer(args.pretrained_model, num_pretrained_skeletons=22)
+        else:
+            model.load(args.pretrained_model)
     
     if jt.rank==0:
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -116,7 +122,8 @@ def train(args):
         aug_prob=args.aug_prob,
         drop_bad=args.drop_bad,
         pose_angle_range=args.pose_angle_range,
-        track_pose_aug=args.track_pose_aug
+        track_pose_aug=args.track_pose_aug,
+        hand=dataset_with_hand,
     )
     
     if args.val_data_list:
@@ -130,6 +137,7 @@ def train(args):
             transform=transform,
             pose_angle_range=0, 
             track_pose_aug=args.track_pose_aug,
+            hand=dataset_with_hand,
         )
     else:
         val_loader = None

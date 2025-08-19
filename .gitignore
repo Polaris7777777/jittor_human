@@ -6,17 +6,27 @@ __pycache__/
 # C extensions
 *.so
 
+# dataset
+dataA/
+dataB/
+
 # ignore model output
 output/
 tmp/
 tmp_predict/
 predict/
+output_old/
+render/
+scripts/
+submit/
 ref
 *.obj
 *.pkl
 *.pth
 *.ckpt
 *.txt
+*.npy
+*.png
 
 # keep env
 !requirements.txt

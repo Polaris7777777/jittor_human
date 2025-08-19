@@ -19,14 +19,20 @@ def predict(args):
     # Create model
     model = create_model(
         model_name=args.model_name,
-        model_type=args.model_type
+        model_type=args.model_type,
+        output_channels=args.num_skeletons * 3,
+        with_normals=args.wnormals,
+        num_tokens=args.num_tokens,
+        feat_dim=args.feat_dim,
+        encoder_layers=args.encoder_layers
     )
-    
-    sampler = SamplerMix(num_samples=1024, vertex_samples=512)
+
+    sampler = SamplerMix(num_samples=args.num_samples, vertex_samples=args.vertex_samples)
     
     # Load pre-trained model if specified
     if args.pretrained_model:
         model.load(args.pretrained_model)
+    model.eval()
     
     predict_loader = get_dataloader(
         data_root=args.data_root,
@@ -41,13 +47,15 @@ def predict(args):
     print("start predicting...")
     exporter = Exporter()
     for batch_idx, data in tqdm(enumerate(predict_loader)):
-        vertices, cls, id = data['vertices'], data['cls'], data['id']
+        vertices, cls, id, normals = data['vertices'], data['cls'], data['id'], data['normals']
         # Reshape input if needed
-        if vertices.ndim == 3:  # [B, N, 3]
-            vertices = vertices.permute(0, 2, 1)  # [B, 3, N]
         B = vertices.shape[0]
-        outputs = model(vertices)
+        if args.wnormals:
+            outputs = model(vertices, normals)
+        else:
+            outputs = model(vertices)
         outputs = outputs.reshape(B, -1, 3)
+        print(outputs.shape)
         for i in range(len(cls)):
             path = os.path.join(predict_output_dir, cls[i], str(id[i].item()))
             os.makedirs(path, exist_ok=True)
@@ -63,10 +71,15 @@ def main():
                         help='Root directory for the data files')
     parser.add_argument('--predict_data_list', type=str, required=True,
                         help='Path to the prediction data list file')
-    
+    parser.add_argument('--num_samples', type=int, default=1024,
+                        help='Number of samples to use for each point cloud')
+    parser.add_argument('--vertex_samples', type=int, default=512,
+                        help='Number of vertex samples to use for each point cloud')
+    parser.add_argument('--num_skeletons', type=int, default=52,
+                    help='Number of skeletons to predict')
     # Model parameters
     parser.add_argument('--model_name', type=str, default='pct',
-                        choices=['pct', 'pct2', 'custom_pct', 'skeleton'],
+                        choices=['pct', 'pct2', 'sal', 'custom_pct', 'skeleton'],
                         help='Model architecture to use')
     parser.add_argument('--model_type', type=str, default='standard',
                         choices=['standard', 'enhanced'],
@@ -75,6 +88,14 @@ def main():
                         help='Path to pretrained model')
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size for training')
+    parser.add_argument('--wnormals', action='store_true',
+                        help='Use normals in the model input')
+    parser.add_argument('--num_tokens', type=int, default=512,
+                        help='Number of tokens for SAL model')
+    parser.add_argument('--feat_dim', type=int, default=512,
+                        help='Feature dimension for the model')
+    parser.add_argument('--encoder_layers', type=int, default=8,
+                        help='Number of heads in the encoder')
     
     # Predict parameters
     parser.add_argument('--predict_output_dir', type=str,

@@ -1,12 +1,13 @@
 import argparse
 import numpy as np
 import os
+os.environ['HARD'] = '1'
+
 from random import shuffle
 
 from dataset.asset import Asset
 from dataset.exporter import Exporter
 from dataset.format import parents, id_to_name
-
 
 def main(args):
     '''
@@ -37,12 +38,31 @@ def main(args):
         vertices = np.load(os.path.join(root, 'transformed_vertices.npy'))
         skin = np.load(os.path.join(root, 'predict_skin.npy'))
         joints = np.load(os.path.join(root, 'predict_skeleton.npy'))
+        
+        # Load sampled vertices if available
+        sampled_vertices_path = os.path.join(root, 'sampled_vertices.npy')
+        sampled_vertices = None
+        if os.path.exists(sampled_vertices_path):
+            sampled_vertices = np.load(sampled_vertices_path)
+        
         if render:
             exporter._render_skeleton(
                 path=os.path.join(save_path, 'skeleton.png'),
                 joints=joints,
                 parents=parents,
             )
+            
+            # Render sampled vertices if available
+            if sampled_vertices is not None:
+                # Create a dummy skin weight (all green) for visualization
+                dummy_skin = np.ones(sampled_vertices.shape[0])
+                exporter._render_skin(
+                    path=os.path.join(save_path, 'sampled_vertices.png'),
+                    skin=dummy_skin,
+                    vertices=sampled_vertices,
+                    joint=None,  # No specific joint highlight
+                )
+            
             for id in id_to_name:
                 name = id_to_name[id]
                 exporter._render_skin(
@@ -53,7 +73,8 @@ def main(args):
                 )
         if export_fbx:
             names = [f'bone_{i}' for i in range(len(parents))]
-            asset = Asset.load(path=os.path.join("data", root.replace('predict', 'test')+".npz"))
+            asset_path = '/'.join(root.split('/')[2:])
+            asset = Asset.load(path=os.path.join("dataB/test/", asset_path+".npz"))
             exporter._export_fbx(
                 path=os.path.join(save_path, f'res.fbx'),
                 vertices=vertices,

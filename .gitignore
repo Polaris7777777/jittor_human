@@ -19,6 +19,7 @@ output_old/
 render/
 scripts/
 submit/
+PCT/
 ref
 *.obj
 *.pkl
@@ -27,6 +28,7 @@ ref
 *.txt
 *.npy
 *.png
+*.zip
 
 # keep env
 !requirements.txt

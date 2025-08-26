@@ -37,28 +37,27 @@ def train(args):
     Args:
         args: Command line arguments
     """
-    if jt.rank == 0:
-        # Create output directory if it doesn't exist
-        if not os.path.exists(args.output_dir):
-            os.makedirs(args.output_dir)
-        
-        # Set up logging
-        log_file = os.path.join(args.output_dir, 'training_log.txt')
-        vital_files = ['train_skeleton.py', 'models/skeleton.py', 'dataset/dataset.py']
-        for file in vital_files:
-            shutil.copy(file, args.output_dir)
-        # writer = SummaryWriter(logdir=args.output_dir)
-        wandb.init(project="jittor-skeleton-training", config=args, name=f"skeleton_{args.model_name}", dir=args.output_dir)
-        wandb.run.name = f"skeleton_{time.strftime('%Y%m%d_%H%M%S')}"
+    # Create output directory if it doesn't exist
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+    
+    # Set up logging
+    log_file = os.path.join(args.output_dir, 'training_log.txt')
+    vital_files = ['train_skeleton.py', 'models/skeleton.py', 'dataset/dataset.py']
+    for file in vital_files:
+        shutil.copy(file, args.output_dir)
+    # writer = SummaryWriter(logdir=args.output_dir)
+    wandb.init(project="jittor-skeleton-training", config=args, name=f"skeleton_{args.model_name}", dir=args.output_dir)
+    wandb.run.name = f"skeleton_{time.strftime('%Y%m%d_%H%M%S')}"
 
-        def log_message(message):
-            """Helper function to log messages to file and print to console"""
-            with open(log_file, 'a') as f:
-                f.write(f"{message}\n")
-            print(message)
-        
-        # Log training parameters
-        log_message(f"Starting training with parameters: {args}")
+    def log_message(message):
+        """Helper function to log messages to file and print to console"""
+        with open(log_file, 'a') as f:
+            f.write(f"{message}\n")
+        print(message)
+    
+    # Log training parameters
+    log_message(f"Starting training with parameters: {args}")
     
     # Create model
     num_skeletons = 52 if dataset_with_hand else 22
@@ -76,18 +75,15 @@ def train(args):
 
     # Load pre-trained model if specified
     if args.pretrained_model:
-        if jt.rank==0: 
-            log_message(f"Loading pretrained model from {args.pretrained_model}")
+        log_message(f"Loading pretrained model from {args.pretrained_model}")
 
         if dataset_with_hand:
             model.load_with_skeleton_transfer(args.pretrained_model, num_pretrained_skeletons=22)
         else:
             model.load(args.pretrained_model)
     
-    if jt.rank==0:
-        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        log_message(f"Total trainable parameters: {total_params}")
-
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log_message(f"Total trainable parameters: {total_params}")
 
     # Create optimizer
     if args.optimizer == 'sgd':
@@ -148,18 +144,17 @@ def train(args):
         # Training phase
         model.train()
 
-        if jt.rank==0:
-            train_loss = 0.0
-            loss_dict = {
-                'mse': 0.0,
-                'J2J': 0.0,
-                'symmetry': 0.0,
-                'bone_length_symmetry': 0.0,
-                'topology': 0.0,
-                'relative_position': 0.0,
-                'mesh_interior': 0.0
-            }
-            start_time = time.time()
+        train_loss = 0.0
+        loss_dict = {
+            'mse': 0.0,
+            'J2J': 0.0,
+            'symmetry': 0.0,
+            'bone_length_symmetry': 0.0,
+            'topology': 0.0,
+            'relative_position': 0.0,
+            'mesh_interior': 0.0
+        }
+        start_time = time.time()
         
         for batch_idx, data in enumerate(train_loader):
             # Get data and labels
@@ -182,12 +177,13 @@ def train(args):
             
             # 添加mesh内部约束损失
             # 优先使用基于法向量的方法
+            out_skeleton = [9, 13, 17, 21]
+            inmask = jt.ones(outputs.shape[1], dtype=jt.bool)
+            if hasattr(args, 'terminal_interior_loss') and args.terminal_interior_loss:
+                # 如果开启了终端关节的内部约束损失，则不计算手脚的内部约束损失
+                inmask[out_skeleton] = False
+                
             if 'normals' in data and hasattr(args, 'use_normals_interior') and args.use_normals_interior:
-                out_skeleton = [9, 13, 17, 21]
-                inmask = jt.ones(outputs.shape[1], dtype=jt.bool)
-                if args.terminal_interior_loss:
-                    # 如果开启了终端关节的内部约束损失，则不计算手脚的内部约束损失
-                    inmask[out_skeleton] = False    
                 mesh_interior_loss = mesh_interior_loss_hierarchical(outputs[:, inmask], vertices, normals, 
                                                                        margin=args.interior_margin)
             else:
@@ -201,7 +197,6 @@ def train(args):
                  + topo_loss * args.topo_loss_weight \
                  + rel_pos_loss * args.rel_pos_loss_weight \
                  + mesh_interior_loss * args.mesh_interior_weight
-
 
             # Backward pass and optimize
             optimizer.zero_grad()
@@ -219,64 +214,58 @@ def train(args):
                 rel_pos_loss = rel_pos_loss.mpi_all_reduce()
                 mesh_interior_loss = mesh_interior_loss.mpi_all_reduce()
 
-            if jt.rank==0:
-                # Calculate statistics
-                train_loss += loss.item()
+            # Calculate statistics
+            train_loss += loss.item()
 
-                # Update loss statistics
-                loss_dict['mse'] += mse_loss.item()
-                loss_dict['J2J'] += J2J_loss.item()
-                loss_dict['symmetry'] += sym_loss.item()
-                loss_dict['bone_length_symmetry'] += sym_bone_loss.item()
-                loss_dict['topology'] += topo_loss.item()
-                loss_dict['relative_position'] += rel_pos_loss.item()
-                loss_dict['mesh_interior'] += mesh_interior_loss.item()
+            # Update loss statistics
+            loss_dict['mse'] += mse_loss.item()
+            loss_dict['J2J'] += J2J_loss.item()
+            loss_dict['symmetry'] += sym_loss.item()
+            loss_dict['bone_length_symmetry'] += sym_bone_loss.item()
+            loss_dict['topology'] += topo_loss.item()
+            loss_dict['relative_position'] += rel_pos_loss.item()
+            loss_dict['mesh_interior'] += mesh_interior_loss.item()
 
-                
-                # Print progress
-                if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
-                    log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] Train Loss: {train_loss/(batch_idx+1):.4f} "
-                            f"MSE Loss: {loss_dict['mse']/(batch_idx+1):.4f} J2J Loss: {loss_dict['J2J']/(batch_idx+1):.6f} Sym Loss: {loss_dict['symmetry']/(batch_idx+1):.4f} "
-                            f"SymBone Loss: {loss_dict['bone_length_symmetry']/(batch_idx+1):.4f} Topo Loss: {loss_dict['topology']/(batch_idx+1):.4f} "
-                            f"RelPos Loss: {loss_dict['relative_position']/(batch_idx+1):.4f} Interior Loss: {loss_dict['mesh_interior']/(batch_idx+1):.4f}")
-                    global_step = epoch * len(train_loader) + batch_idx
-                    wandb.log({
-                        "skeleton epoch": epoch + 1,
-                        "skeleton total_loss": train_loss,
-                        "skeleton pos_loss": loss_dict['mse'] / (batch_idx + 1),
-                        "skeleton topo_loss": loss_dict['topology'] / (batch_idx + 1),
-                        "skeleton rel_loss": loss_dict['relative_position'] / (batch_idx + 1),
-                        "skeleton sym_loss": loss_dict['symmetry'] / (batch_idx + 1),
-                        "skeleton interior_loss": loss_dict['mesh_interior'] / (batch_idx + 1),
-                        "skeleton learning_rate": optimizer.lr if hasattr(optimizer, 'lr') else args.learning_rate
-                    }, step=global_step)
+            # Print progress
+            if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
+                log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] Train Loss: {train_loss/(batch_idx+1):.4f} "
+                        f"MSE Loss: {loss_dict['mse']/(batch_idx+1):.4f} J2J Loss: {loss_dict['J2J']/(batch_idx+1):.6f} Sym Loss: {loss_dict['symmetry']/(batch_idx+1):.4f} "
+                        f"SymBone Loss: {loss_dict['bone_length_symmetry']/(batch_idx+1):.4f} Topo Loss: {loss_dict['topology']/(batch_idx+1):.4f} "
+                        f"RelPos Loss: {loss_dict['relative_position']/(batch_idx+1):.4f} Interior Loss: {loss_dict['mesh_interior']/(batch_idx+1):.4f}")
+                global_step = epoch * len(train_loader) + batch_idx
+                wandb.log({
+                    "skeleton epoch": epoch + 1,
+                    "skeleton total_loss": train_loss,
+                    "skeleton pos_loss": loss_dict['mse'] / (batch_idx + 1),
+                    "skeleton topo_loss": loss_dict['topology'] / (batch_idx + 1),
+                    "skeleton rel_loss": loss_dict['relative_position'] / (batch_idx + 1),
+                    "skeleton sym_loss": loss_dict['symmetry'] / (batch_idx + 1),
+                    "skeleton interior_loss": loss_dict['mesh_interior'] / (batch_idx + 1),
+                    "skeleton learning_rate": optimizer.lr if hasattr(optimizer, 'lr') else args.learning_rate
+                }, step=global_step)
         
-        if jt.rank==0:
-            # Calculate epoch statistics
-            train_loss /= len(train_loader)
-            epoch_time = time.time() - start_time
-            
-            log_message(f"Epoch [{epoch+1}/{args.epochs}] "
-                    f"Train Loss: {train_loss:.4f} "
-                    f"Time: {epoch_time:.2f}s "
-                    f"LR: {optimizer.lr:.6f}"
-                    f" MSE Loss: {loss_dict['mse']/len(train_loader):.4f} "
-                    f"J2J Loss: {loss_dict['J2J']/len(train_loader):.6f} "
-                    f"Sym Loss: {loss_dict['symmetry']/len(train_loader):.4f} "
-                    f"SymBone Loss: {loss_dict['bone_length_symmetry']/len(train_loader):.4f} "
-                    f"Topo Loss: {loss_dict['topology']/len(train_loader):.4f} "
-                    f"RelPos Loss: {loss_dict['relative_position']/len(train_loader):.4f} "
-                    f"Interior Loss: {loss_dict['mesh_interior']/len(train_loader):.4f}")
+        # Calculate epoch statistics
+        train_loss /= len(train_loader)
+        epoch_time = time.time() - start_time
         
+        log_message(f"Epoch [{epoch+1}/{args.epochs}] "
+                f"Train Loss: {train_loss:.4f} "
+                f"Time: {epoch_time:.2f}s "
+                f"LR: {optimizer.lr:.6f}"
+                f" MSE Loss: {loss_dict['mse']/len(train_loader):.4f} "
+                f"J2J Loss: {loss_dict['J2J']/len(train_loader):.6f} "
+                f"Sym Loss: {loss_dict['symmetry']/len(train_loader):.4f} "
+                f"SymBone Loss: {loss_dict['bone_length_symmetry']/len(train_loader):.4f} "
+                f"Topo Loss: {loss_dict['topology']/len(train_loader):.4f} "
+                f"RelPos Loss: {loss_dict['relative_position']/len(train_loader):.4f} "
+                f"Interior Loss: {loss_dict['mesh_interior']/len(train_loader):.4f}")
 
-        
         # Validation phase
         if val_loader is not None and (epoch + 1) % args.val_freq == 0:
             model.eval()
-            if jt.rank ==0 :
-                val_loss = 0.0
-                J2J_loss = 0.0
-                show_id = np.random.randint(0, len(val_loader))
+            val_loss = 0.0
+            J2J_loss = 0.0
+            show_id = np.random.randint(0, len(val_loader))
 
             for batch_idx, data in enumerate(val_loader):
                 # Get data and labels
@@ -293,48 +282,45 @@ def train(args):
                 if jt.in_mpi:
                     loss = loss.mpi_all_reduce()
 
-                if jt.rank==0:
-                    # export render results
-                    if batch_idx == show_id:
-                        exporter = Exporter()
-                        # export every joint's corresponding skinning
-                        from dataset.format import parents
-                        exporter._render_skeleton(path=f"{args.output_dir}/tmp/skeleton/epoch_{epoch}/skeleton_ref.png", joints=joints[0].numpy().reshape(-1, 3), parents=parents)
-                        exporter._render_skeleton(path=f"{args.output_dir}/tmp/skeleton/epoch_{epoch}/skeleton_pred.png", joints=outputs[0].numpy().reshape(-1, 3), parents=parents)
-                        exporter._render_pc(path=f"{args.output_dir}/tmp/skeleton/epoch_{epoch}/vertices.png", vertices=vertices[0].permute(1, 0).numpy())
+                # export render results
+                if batch_idx == show_id:
+                    exporter = Exporter()
+                    # export every joint's corresponding skinning
+                    from dataset.format import parents
+                    os.makedirs(f"{args.output_dir}/tmp/skeleton/epoch_{epoch}", exist_ok=True)
+                    exporter._render_skeleton(path=f"{args.output_dir}/tmp/skeleton/epoch_{epoch}/skeleton_ref.png", joints=joints[0].numpy().reshape(-1, 3), parents=parents)
+                    exporter._render_skeleton(path=f"{args.output_dir}/tmp/skeleton/epoch_{epoch}/skeleton_pred.png", joints=outputs[0].numpy().reshape(-1, 3), parents=parents)
+                    exporter._render_pc(path=f"{args.output_dir}/tmp/skeleton/epoch_{epoch}/vertices.png", vertices=vertices[0].permute(1, 0).numpy())
 
-                    val_loss += loss.item()
-                    for i in range(outputs.shape[0]):
-                        J2J_loss += J2J(outputs[i].reshape(-1, 3), joints[i].reshape(-1, 3)).item() / outputs.shape[0]
-            
-            if jt.rank==0:
-                # Calculate validation statistics
-                val_loss /= len(val_loader)
-                J2J_loss /= len(val_loader)
-                
-                log_message(f"Validation Loss: {val_loss:.4f} J2J Loss: {J2J_loss:.4f}")
-                # writer.add_scalar('val/loss', val_loss, epoch)
-                # writer.add_scalar('val/J2J_loss', J2J_loss, epoch)
-
-                # Save best model
-                if J2J_loss < best_loss:
-                    best_loss = J2J_loss
-                    model_path = os.path.join(args.output_dir, 'best_model.pkl')
-                    model.save(model_path)
-                    log_message(f"Saved best model with loss {best_loss:.4f} to {model_path}")
+                val_loss += loss.item()
+                for i in range(outputs.shape[0]):
+                    J2J_loss += J2J(outputs[i].reshape(-1, 3), joints[i].reshape(-1, 3)).item() / outputs.shape[0]
         
-        if jt.rank==0:
-            # Save checkpoint
-            if (epoch + 1) % args.save_freq == 0:
-                checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch+1}.pkl')
-                model.save(checkpoint_path)
-                log_message(f"Saved checkpoint to {checkpoint_path}")
+            # Calculate validation statistics
+            val_loss /= len(val_loader)
+            J2J_loss /= len(val_loader)
+            
+            log_message(f"Validation Loss: {val_loss:.4f} J2J Loss: {J2J_loss:.4f}")
+            # writer.add_scalar('val/loss', val_loss, epoch)
+            # writer.add_scalar('val/J2J_loss', J2J_loss, epoch)
+
+            # Save best model
+            if J2J_loss < best_loss:
+                best_loss = J2J_loss
+                model_path = os.path.join(args.output_dir, 'best_model.pkl')
+                model.save(model_path)
+                log_message(f"Saved best model with loss {best_loss:.4f} to {model_path}")
+        
+        # Save checkpoint
+        if (epoch + 1) % args.save_freq == 0:
+            checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch+1}.pkl')
+            model.save(checkpoint_path)
+            log_message(f"Saved checkpoint to {checkpoint_path}")
     
-    if jt.rank==0:
-        # Save final model
-        final_model_path = os.path.join(args.output_dir, 'final_model.pkl')
-        model.save(final_model_path)
-        log_message(f"Training completed. Saved final model to {final_model_path}")
+    # Save final model
+    final_model_path = os.path.join(args.output_dir, 'final_model.pkl')
+    model.save(final_model_path)
+    log_message(f"Training completed. Saved final model to {final_model_path}")
     
     return model, best_loss
 
